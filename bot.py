@@ -3,8 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiohttp
 import os
-import json
-from typing import Optional
+from datetime import datetime, timezone
 
 # ── Bot setup ──────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -63,8 +62,8 @@ def build_discord_embed(data: dict) -> discord.Embed:
     if data.get("author_name"):
         embed.set_author(
             name=data["author_name"],
-            icon_url=data.get("author_icon") or discord.Embed.Empty,
-            url=data.get("author_url") or discord.Embed.Empty,
+            icon_url=data.get("author_icon") or None,
+            url=data.get("author_url") or None,
         )
 
     if data.get("thumbnail"):
@@ -76,11 +75,10 @@ def build_discord_embed(data: dict) -> discord.Embed:
     if data.get("footer_text"):
         embed.set_footer(
             text=data["footer_text"],
-            icon_url=data.get("footer_icon") or discord.Embed.Empty,
+            icon_url=data.get("footer_icon") or None,
         )
 
     if data.get("timestamp"):
-        from datetime import datetime, timezone
         embed.timestamp = datetime.now(timezone.utc)
 
     for field in data.get("fields", []):
@@ -126,17 +124,17 @@ class EditSelect(discord.ui.Select):
     def __init__(self, embed_name: str):
         self.embed_name = embed_name
         options = [
-            discord.SelectOption(label="Basic Info",       description="Edit title, description, and color",          emoji="✏️"),
-            discord.SelectOption(label="URL",              description="Edit the embed URL (makes title a link)",      emoji="🔗"),
-            discord.SelectOption(label="Thumbnail",        description="Edit the embed thumbnail URL",                 emoji="🖼️"),
-            discord.SelectOption(label="Image",            description="Edit the embed image URL",                     emoji="📷"),
-            discord.SelectOption(label="Footer",           description="Edit the embed footer text and icon",          emoji="📝"),
-            discord.SelectOption(label="Author",           description="Edit the embed author name, icon, and URL",    emoji="👤"),
-            discord.SelectOption(label="Toggle Timestamp", description="Add or remove timestamp from embed",           emoji="⏰"),
-            discord.SelectOption(label="Add Field",        description="Add a new field (max 25)",                     emoji="➕"),
-            discord.SelectOption(label="Edit Field",       description="Edit an existing field",                       emoji="🔧"),
-            discord.SelectOption(label="Remove Field",     description="Remove an existing field",                     emoji="🗑️"),
-            discord.SelectOption(label="Webhook URL",      description="Change the target webhook URL",                emoji="🌐"),
+            discord.SelectOption(label="Basic Info",       description="Edit title, description, and color"),
+            discord.SelectOption(label="URL",              description="Edit the embed URL (makes title a link)"),
+            discord.SelectOption(label="Thumbnail",        description="Edit the embed thumbnail URL"),
+            discord.SelectOption(label="Image",            description="Edit the embed image URL"),
+            discord.SelectOption(label="Footer",           description="Edit the embed footer text and icon"),
+            discord.SelectOption(label="Author",           description="Edit the embed author name, icon, and URL"),
+            discord.SelectOption(label="Toggle Timestamp", description="Add or remove timestamp from embed"),
+            discord.SelectOption(label="Add Field",        description="Add a new field (max 25)"),
+            discord.SelectOption(label="Edit Field",       description="Edit an existing field"),
+            discord.SelectOption(label="Remove Field",     description="Remove an existing field"),
+            discord.SelectOption(label="Webhook URL",      description="Change the target webhook URL"),
         ]
         super().__init__(placeholder="Choose an option to edit the Embed", options=options, row=0)
 
@@ -200,15 +198,15 @@ class EmbedEditorView(discord.ui.View):
         self.embed_name = embed_name
         self.add_item(EditSelect(embed_name))
 
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=1)
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, row=1)
     async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = get_embed_data(interaction.user.id, self.embed_name)
         if not data:
-            await interaction.response.send_message("❌ Embed not found.", ephemeral=True)
+            await interaction.response.send_message("Embed not found.", ephemeral=True)
             return
         if not data.get("webhook_url"):
             await interaction.response.send_message(
-                "⚠️ No webhook URL set! Use the dropdown → **Webhook URL** to add one.",
+                "No webhook URL set! Use the dropdown > Webhook URL to add one.",
                 ephemeral=True,
             )
             return
@@ -218,15 +216,247 @@ class EmbedEditorView(discord.ui.View):
         await interaction.followup.send(msg, ephemeral=True)
         if ok:
             await interaction.edit_original_response(
-                content=f"🚀 **Embed `{self.embed_name}` sent!**",
+                content=f"Embed `{self.embed_name}` sent!",
                 embed=build_discord_embed(data),
                 view=None,
             )
 
-    @discord.ui.button(label="Variables", style=discord.ButtonStyle.secondary, emoji="📋", row=1)
+    @discord.ui.button(label="Variables", style=discord.ButtonStyle.secondary, row=1)
     async def variables(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "**📋 Available Variables:**\n"
+            "**Available Variables:**\n"
+            "`{user}` — Mentions the user\n"
+            "`{server}` — Server name\n"
+            "`{membercount}` — Total members\n"
+            "`{date}` — Current date\n"
+            "`{time}` — Current time",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_embeds.get(interaction.user.id, {}).pop(self.embed_name, None)
+        await interaction.response.edit_message(
+            content="❌ Embed creation **cancelled**.",
+            embed=None,
+            view=None,
+        )
+
+
+# ── Remove field select ────────────────────────────────────────────────────
+
+class RemoveFieldView(discord.ui.View):
+    def __init__(self, embed_name: str, data: dict):
+        super().__init__(timeout=120)
+        self.embed_name = embed_name
+        self.data = data
+        options = [
+            discord.SelectOption(label=f["name"][:100], value=str(i))
+            for i, f in enumerate(data.get("fields", []))
+        ]
+        select = discord.ui.Select(placeholder="Select field to remove", options=options)
+        select.callback = self.remove_callback
+        self.add_item(select)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        idx = int(interaction.data["values"][0])
+        self.data["fields"].pop(idx)
+        save_embed_data(interaction.user.id, self.embed_name, self.data)
+        await interaction.response.edit_message(
+            content="🗑️ Field removed!",
+            embed=preview_embed(self.data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+# ── Message type chooser ───────────────────────────────────────────────────
+
+class MessageTypeView(discord.ui.View):
+    def __init__(self, webhook_url: str):
+        super().__init__(timeout=120)
+        self.webhook_url = webhook_url
+
+    @discord.ui.button(label="Embed", style=discord.ButtonStyle.primary)
+    async def embed_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EmbedNameModal(self.webhook_url))
+
+    @discord.ui.button(label="Normal Message", style=discord.ButtonStyle.secondary)
+    async def message_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NormalMessageModal(self.webhook_url))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODALS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EmbedNameModal(discord.ui.Modal, title="Create Embed"):
+    embed_name = discord.ui.TextInput(label="Embed Name", placeholder='e.g. "announcement"', max_length=50)
+
+    def __init__(self, webhook_url: str):
+        super().__init__()
+        self.webhook_url = webhook_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = self.embed_name.value.strip()
+        data = fresh_embed()
+        data["webhook_url"] = self.webhook_url
+        save_embed_data(interaction.user.id, name, data)
+
+        await interaction.response.send_message(
+            f"✅ You just created a new Embed with name `{name}`!\n\n**What now?**\n"
+            f"• Use the Dropdown to edit the Embed.\n"
+            f"• Can use the embed in Supported modules by referring as `{{embed:{name}}}`\n\n"
+            f"*Timeout: 10 Minutes*",
+            embed=preview_embed(data),
+            view=EmbedEditorView(name),
+        )
+
+
+class NormalMessageModal(discord.ui.Modal, title="Send Normal Message"):
+    content = discord.ui.TextInput(
+        label="Message Content",
+        placeholder="Type your message here...",
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+    )
+
+    def __init__(self, webhook_url: str):
+        super().__init__()
+        self.webhook_url = webhook_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        ok, msg = await send_to_webhook(self.webhook_url, {"content": self.content.value})
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+class BasicInfoModal(discord.ui.Modal, title="Basic Info"):
+    embed_title = discord.ui.TextInput(label="Title", placeholder="Embed title...", required=False, max_length=256)
+    description = discord.ui.TextInput(label="Description", placeholder="Embed description...", style=discord.TextStyle.paragraph, required=False, max_length=4096)
+    color = discord.ui.TextInput(label="Color (hex)", placeholder="#5865F2", required=False, max_length=7)
+
+    def __init__(self, embed_name: str, data: dict):
+        super().__init__()
+        self.embed_name = embed_name
+        self.embed_title.default = data.get("title", "")
+        self.description.default = data.get("description", "")
+        self.color.default = f"#{data.get('color', 0x5865F2):06X}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = get_embed_data(interaction.user.id, self.embed_name)
+        data["title"] = self.embed_title.value.strip()
+        data["description"] = self.description.value.strip()
+        hex_val = self.color.value.strip().lstrip("#")
+        try:
+            data["color"] = int(hex_val, 16)
+        except ValueError:
+            pass
+        save_embed_data(interaction.user.id, self.embed_name, data)
+        await interaction.response.edit_message(
+            content="✏️ **Basic Info updated!**",
+            embed=preview_embed(data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+class SingleFieldModal(discord.ui.Modal):
+    def __init__(self, embed_name: str, data: dict, field_key: str, label: str, placeholder: str, modal_title: str):
+        super().__init__(title=modal_title)
+        self.embed_name = embed_name
+        self.field_key = field_key
+        self.input = discord.ui.TextInput(
+            label=label, placeholder=placeholder,
+            default=data.get(field_key, ""), required=False, max_length=500,
+        )
+        self.add_item(self.input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = get_embed_data(interaction.user.id, self.embed_name)
+        data[self.field_key] = self.input.value.strip()
+        save_embed_data(interaction.user.id, self.embed_name, data)
+        await interaction.response.edit_message(
+            content=f"✅ **{self.title} updated!**",
+            embed=preview_embed(data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+class FooterModal(discord.ui.Modal, title="Footer"):
+    footer_text = discord.ui.TextInput(label="Footer Text", placeholder="Footer text...", required=False, max_length=2048)
+    footer_icon = discord.ui.TextInput(label="Footer Icon URL", placeholder="https://...", required=False, max_length=500)
+
+    def __init__(self, embed_name: str, data: dict):
+        super().__init__()
+        self.embed_name = embed_name
+        self.footer_text.default = data.get("footer_text", "")
+        self.footer_icon.default = data.get("footer_icon", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = get_embed_data(interaction.user.id, self.embed_name)
+        data["footer_text"] = self.footer_text.value.strip()
+        data["footer_icon"] = self.footer_icon.value.strip()
+        save_embed_data(interaction.user.id, self.embed_name, data)
+        await interaction.response.edit_message(
+            content="📝 **Footer updated!**",
+            embed=preview_embed(data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+class AuthorModal(discord.ui.Modal, title="Author"):
+    author_name = discord.ui.TextInput(label="Author Name", placeholder="Author name...", required=False, max_length=256)
+    author_icon = discord.ui.TextInput(label="Author Icon URL", placeholder="https://...", required=False, max_length=500)
+    author_url  = discord.ui.TextInput(label="Author URL", placeholder="https://...", required=False, max_length=500)
+
+    def __init__(self, embed_name: str, data: dict):
+        super().__init__()
+        self.embed_name = embed_name
+        self.author_name.default = data.get("author_name", "")
+        self.author_icon.default = data.get("author_icon", "")
+        self.author_url.default  = data.get("author_url",  "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = get_embed_data(interaction.user.id, self.embed_name)
+        data["author_name"] = self.author_name.value.strip()
+        data["author_icon"] = self.author_icon.value.strip()
+        data["author_url"]  = self.author_url.value.strip()
+        save_embed_data(interaction.user.id, self.embed_name, data)
+        await interaction.response.edit_message(
+            content="👤 **Author updated!**",
+            embed=preview_embed(data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+class AddFieldModal(discord.ui.Modal, title="Add Field"):
+    field_name  = discord.ui.TextInput(label="Field Name",  placeholder="Field name...",  max_length=256)
+    field_value = discord.ui.TextInput(label="Field Value", placeholder="Field value...", style=discord.TextStyle.paragraph, max_length=1024)
+
+    def __init__(self, embed_name: str, data: dict):
+        super().__init__()
+        self.embed_name = embed_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = get_embed_data(interaction.user.id, self.embed_name)
+        data.setdefault("fields", []).append({
+            "name": self.field_name.value.strip(),
+            "value": self.field_value.value.strip(),
+            "inline": False,
+        })
+        save_embed_data(interaction.user.id, self.embed_name, data)
+        await interaction.response.edit_message(
+            content="➕ **Field added!**",
+            embed=preview_embed(data),
+            view=EmbedEditorView(self.embed_name),
+        )
+
+
+class EditFieldModal(discord.ui.Modal, title="Edit Field"):
+    field_index = discord.ui.TextInput(label="Field number (1, 2, 3...)", placeholder="1", max_length=2)
+    field_name  = discord.ui.TextInput(label="New Field Name",  placeholder="Field name...",  max_length=256)
+    field_value = discord.ui.TextInput(label="New Field Value", placeholder="Field value...", style=discord.TextStyle.paragraph, max_length=1024)
+
+    def _ "**📋 Available Variables:**\n"
             "`{user}` — Mentions the user\n"
             "`{server}` — Server name\n"
             "`{membercount}` — Total members\n"
